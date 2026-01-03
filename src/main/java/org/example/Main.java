@@ -2,6 +2,7 @@ package org.example;
 
 import okhttp3.OkHttpClient;
 import org.stellar.sdk.*;
+import org.stellar.sdk.FeeBumpTransaction;
 import org.stellar.sdk.Transaction;
 import org.stellar.sdk.exception.BadRequestException;
 import org.stellar.sdk.operations.InvokeHostFunctionOperation;
@@ -25,34 +26,61 @@ public class Main {
             Server server = new Server("", getUnsafeOkHttpClient(), getUnsafeOkHttpClient());
 
             String sourceAccountId = "GAJTZM7UD2CI3WQ356QFX2RGVLNVYWTMQ76DCKPDOTEOXJDFSSWRKPYS";
-            String sourceSecretKey = "SDE6L3JVJX647EP2MOHMVDKSIIH6YKXFH3G4IQCCV3NM5JO4ZYM24LFB"; // Replace with actual secret key
-            String contractId = "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA"; // SAC contract address
-            String toAddress = "CA2BUIM5VDDH6GG3LGOFOLO43ZXQ6PPT2YOTDPR4LKIQF43KEMR666BN"; // Replace with destination address
-            BigInteger amount = BigInteger.valueOf(10000000); // Amount in stroops (e.g., 100.0000000 XLM)
+            String sourceSecretKey = "SDE6L3JVJX647EP2MOHMVDKSIIH6YKXFH3G4IQCCV3NM5JO4ZYM24LFB";
 
             AccountResponse sourceAccount = server.accounts().account(sourceAccountId);
             KeyPair sourceKeyPair = KeyPair.fromSecretSeed(sourceSecretKey);
+
+            String channelAccountId = "GCUGDRMQQZH6FFST74QN3QWB33WYNSXFBXNZQJYUFTS5QTACKIORZ7TJ";
+            String channelSecretKey = "SBOO4KWGCBZGS5SNDVXMWSERCJMRBAKDDYRFTY6H5PID4W3IJZKH2ENL";
+
+            AccountResponse channelAccount = server.accounts().account(channelAccountId);
+            KeyPair channelKeyPair = KeyPair.fromSecretSeed(channelSecretKey);
+
+            String contractId = "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA"; // USDC Testnet SAC contract address
+            String toAddress = "CBKN4YDEGJW5NF7HAPXIPGKPZWGXP7ABGN6WLAJWE4OA2CN56GKYFCAH";
+            BigInteger amount = BigInteger.valueOf(10000000); // Amount in stroops (1 lumen -> 10^7 stroops)
+
+            String issuer = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
 
             System.out.println("Building SAC transfer transaction...");
             System.out.println("Source Account: " + sourceAccountId);
             System.out.println("Contract ID: " + contractId);
 
-            Transaction transaction = buildSacTransferTransaction(
+            // Normal transaction initiated by source account.
+            String transaction = buildSacTransferTransaction(
                 sourceAccount, 
-                sourceKeyPair, 
-                contractId, 
-                sourceAccountId, 
+                sourceKeyPair,
+                contractId,
                 toAddress, 
                 amount, 
-                network
+                network,
+                issuer
             );
 
             System.out.println("Transaction built successfully!");
-            System.out.println("Transaction XDR: " + transaction.toEnvelopeXdrBase64());
-            server.submitTransaction(transaction, true);
+            System.out.println("Transaction XDR: " + transaction);
+            server.submitTransactionXdr(transaction);
+
+            // Channel account transaction using fee bump tx.
+            String channelTransaction = buildSacTransferTransaction(
+                    sourceAccount,
+                    sourceKeyPair,
+                    channelAccount,
+                    channelKeyPair,
+                    contractId,
+                    toAddress,
+                    amount,
+                    network,
+                    issuer
+            );
+
+            System.out.println("Transaction built successfully!");
+            System.out.println("Transaction XDR: " + channelTransaction);
+            server.submitTransactionXdr(channelTransaction);
 
         } catch (BadRequestException e) {
-            System.err.println("EROROROROROR: " + e.getProblem());
+            System.err.println("Error: " + e.getProblem());
             e.printStackTrace();
         }
 
@@ -62,16 +90,41 @@ public class Main {
         }
     }
 
-    private static Transaction buildSacTransferTransaction(
+    private static String buildSacTransferTransaction(
             AccountResponse sourceAccount,
             KeyPair sourceKeyPair,
             String contractId,
-            String fromAddress,
             String toAddress,
             BigInteger amount,
-            Network network
+            Network network,
+            String issuer
+    ) throws IOException {
+        return buildSacTransferTransaction(
+                sourceAccount,
+                sourceKeyPair,
+                null,
+                null,
+                contractId,
+                toAddress,
+                amount,
+                network,
+                issuer
+        );
+    }
+
+    private static String buildSacTransferTransaction(
+            AccountResponse sourceAccount,
+            KeyPair sourceKeyPair,
+            AccountResponse channelAccount,
+            KeyPair channelKeyPair,
+            String contractId,
+            String toAddress,
+            BigInteger amount,
+            Network network,
+            String issuer
     ) throws IOException {
 
+        String fromAddress = sourceAccount.getAccountId();
         // Create the transfer function arguments
         SCVal fromVal = Scv.toAddress(fromAddress);
 
@@ -104,10 +157,12 @@ public class Main {
         long cpuInstructions = 285237;
         long readBytes = 288;
         long writeBytes = 368;
-        long resourceFee = 109107;
+        long resourceFee = 300000;
 
 
         // Initialize LedgerKeyEntries.
+
+        // Read only entries.
         LedgerKey sacLedgerKey = LedgerKey.builder()
                 .discriminant(LedgerEntryType.CONTRACT_DATA)
                 .contractData(LedgerKey.LedgerKeyContractData.builder()
@@ -116,13 +171,21 @@ public class Main {
                         .durability(ContractDataDurability.PERSISTENT)
                         .build()).build();
 
-        LedgerKey fromLedgerKey = getLedgerKeyFromAddress(fromAddress, contractId);
-        LedgerKey toLedgerKey = getLedgerKeyFromAddress(toAddress, contractId);
+        LedgerKey issuerLedgerKey = LedgerKey.builder()
+                .discriminant(LedgerEntryType.ACCOUNT)
+                .account(LedgerKey.LedgerKeyAccount.builder()
+                        .accountID(KeyPair.fromAccountId(issuer).getXdrAccountId())
+                        .build())
+                .build();
+
+        // Read-Write entries.
+        LedgerKey fromLedgerKey = getLedgerKeyFromAddress(fromAddress, contractId, issuer);
+        LedgerKey toLedgerKey = getLedgerKeyFromAddress(toAddress, contractId, issuer);
 
         SorobanTransactionData sorobanTransactionData = SorobanTransactionData.builder()
                 .resources(SorobanResources.builder()
                         .footprint(LedgerFootprint.builder()
-                                .readOnly(new LedgerKey[]{sacLedgerKey})
+                                .readOnly(new LedgerKey[]{sacLedgerKey, issuerLedgerKey})
                                 .readWrite(new LedgerKey[]{fromLedgerKey, toLedgerKey})
                                 .build())
                         .instructions(Scv.toUint32(cpuInstructions).getU32())
@@ -146,25 +209,45 @@ public class Main {
         InvokeHostFunctionOperation operation = InvokeHostFunctionOperation.builder()
                 .hostFunction(hostFunction)
                 .auth(List.of(authorizationEntry))
+                .sourceAccount(fromAddress)
                 .build();
 
-        // Build the transaction
-        Transaction tx = new TransactionBuilder(sourceAccount, network)
-                .addOperation(operation)
-                .setTimeout(300)
-                .setBaseFee(10000000)
-                .setSorobanData(sorobanTransactionData)
-                .build(); // 5 minutes timeout
+        if (channelAccount == null) {
 
-        
-        tx.sign(sourceKeyPair);
+            // Build the transaction
+            Transaction tx = new TransactionBuilder(sourceAccount, network)
+                    .addOperation(operation)
+                    .setTimeout(300)
+                    .setBaseFee(10000000)
+                    .setSorobanData(sorobanTransactionData)
+                    .build(); // 5 minutes timeout
 
-        System.out.println(sorobanTransactionData.toXdrBase64());
 
-        return tx;
+            tx.sign(sourceKeyPair);
+
+            return tx.toEnvelopeXdrBase64();
+        }
+        else {
+            // Build the transaction
+            Transaction tx = new TransactionBuilder(channelAccount, network)
+                    .addOperation(operation)
+                    .setTimeout(300)
+                    .setBaseFee(10000000)
+                    .setSorobanData(sorobanTransactionData)
+                    .build(); // 5 minutes timeout
+
+
+            tx.sign(channelKeyPair);
+            tx.sign(sourceKeyPair);
+
+            FeeBumpTransaction feeBumpTransaction = FeeBumpTransaction.createWithBaseFee(fromAddress, tx.getFee(), tx);
+            feeBumpTransaction.sign(sourceKeyPair);
+
+            return feeBumpTransaction.toEnvelopeXdrBase64();
+        }
     }
 
-    private static LedgerKey getLedgerKeyFromAddress(String address, String contractId) {
+    private static LedgerKey getLedgerKeyFromAddress(String address, String contractId, String issuer) {
         if (StrKey.isValidEd25519PublicKey(address)) {
             AssetCode4 usdcCode = new AssetCode4();
             usdcCode.setAssetCode4(Util.paddedByteArray("USDC", 4));
@@ -176,7 +259,7 @@ public class Main {
                                     .discriminant(AssetType.ASSET_TYPE_CREDIT_ALPHANUM4)
                                     .alphaNum4(AlphaNum4.builder()
                                             .assetCode(usdcCode)
-                                            .issuer(KeyPair.fromAccountId("GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5").getXdrAccountId())
+                                            .issuer(KeyPair.fromAccountId(issuer).getXdrAccountId())
                                             .build())
                                     .build())
                             .build())
