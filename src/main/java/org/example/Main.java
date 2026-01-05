@@ -23,7 +23,7 @@ public class Main {
     public static void main(String[] args) {
         try {
             Network network = Network.TESTNET;
-            Server server = new Server("", getUnsafeOkHttpClient(), getUnsafeOkHttpClient());
+            Server server = new Server("", getUnsafeOkHttpClient(), getUnsafeOkHttpClient()); // Put a quicknode testnet URL here.
 
             String sourceAccountId = "GAJTZM7UD2CI3WQ356QFX2RGVLNVYWTMQ76DCKPDOTEOXJDFSSWRKPYS";
             String sourceSecretKey = "SDE6L3JVJX647EP2MOHMVDKSIIH6YKXFH3G4IQCCV3NM5JO4ZYM24LFB";
